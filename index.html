@@ -328,7 +328,8 @@
         </div>
 
         <div class="toolbar">
-          <button class="primary" id="generateAddonFilesBtn">Générer les fichiers</button>
+          <button class="primary" id="optimizeAddonBtn">Optimiser la répartition</button>
+          <button class="primary" id="generateAddonFilesBtn">Générer le PACK ZIP</button>
           <button id="generateAddonLuaBtn">Lua seul</button>
           <button id="generateAddonReadmeBtn">README seul</button>
         </div>
@@ -631,217 +632,537 @@
     return total;
   }
 
-  function calculate(){
-    let body = 0n;
-    let multiplier = 1n;
-    const chosen = [];
 
-    BODYGROUPS.forEach((bg, i) => {
-      if (bg.options.length === 0) return;
-      const idx = BigInt(Math.min(selectedIndices[i] || 0, bg.options.length - 1));
-      body += idx * multiplier;
-      chosen.push({ name: bg.name, idx: Number(idx) });
-      multiplier *= BigInt(bg.options.length);
-    });
+  const BODY_LIMIT = 4294967295n;
+  const MAX_COMBINATIONS_PER_ADDON = BODY_LIMIT + 1n;
 
-    resultEl.textContent = BODYGROUPS.length ? body.toString() : '—';
-    checkLimit();
-
-    let luaLines = chosen
-      .filter(c => c.idx !== 0)
-      .map(c => `ent:SetBodygroup(ent:FindBodygroupByName("${c.name}"), ${c.idx})`);
-    codeOutEl.textContent = `-- Code Lua équivalent :\n` + (luaLines.length ? luaLines.join('\n') : '-- (tout est à l’index 0 / blank)');
+  function formatBigInt(value){
+    return value.toLocaleString('fr-FR');
   }
 
-  function decode(bodyStr){
-    decodeList.innerHTML = '';
-    if (bodyStr === '' || isNaN(bodyStr) || Number(bodyStr) < 0) return;
-    let remaining = BigInt(Math.floor(Number(bodyStr)));
-    BODYGROUPS.forEach(bg => {
-      if (bg.options.length === 0) return;
-      const n = BigInt(bg.options.length);
-      const idx = remaining % n;
-      remaining = remaining / n;
-      const optName = bg.options[Number(idx)] || '(vide)';
-      const item = document.createElement('div');
-      item.className = 'decode-item';
-      item.innerHTML = `<span>${bg.name}</span><span>[${idx}] ${optName}</span>`;
-      decodeList.appendChild(item);
+  function escapeHtml(value){
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  function getCombinationCount(groups){
+    let total = 1n;
+    groups.forEach(bg => {
+      if (Array.isArray(bg.options) && bg.options.length > 0){
+        total *= BigInt(bg.options.length);
+      }
     });
+    return total;
+  }
+
+  /*
+   * Répartition exacte avec un algorithme Best-Fit Decreasing.
+   * Une case peut contenir au maximum 2^32 combinaisons,
+   * car son m_nBody va de 0 à 2^32 - 1.
+   *
+   * Ce n'est pas une recherche NP-complète exhaustive : on privilégie
+   * une répartition rapide et très efficace pour de nombreux bodygroups.
+   */
+  function optimizeAddonPacking(){
+    const groups = BODYGROUPS
+      .map((bg, index) => ({
+        name: bg.name || `(sans nom ${index + 1})`,
+        options: Array.isArray(bg.options) ? bg.options.slice() : [],
+        originalIndex: index
+      }))
+      .filter(bg => bg.options.length > 0);
+
+    if (!groups.length) return [];
+
+    const tooLarge = groups.find(
+      bg => BigInt(bg.options.length) > MAX_COMBINATIONS_PER_ADDON
+    );
+
+    if (tooLarge){
+      throw new Error(
+        `"${tooLarge.name}" possède ${formatBigInt(BigInt(tooLarge.options.length))} options ` +
+        `et dépasse à lui seul la capacité d'un addon.`
+      );
+    }
+
+    // Les plus gros groupes d'abord.
+    groups.sort((a, b) => b.options.length - a.options.length);
+
+    const bins = [];
+
+    for (const group of groups){
+      const radix = BigInt(group.options.length);
+
+      let bestBin = -1;
+      let bestRemaining = null;
+
+      for (let i = 0; i < bins.length; i++){
+        const candidate = bins[i].combinations * radix;
+
+        if (candidate <= MAX_COMBINATIONS_PER_ADDON){
+          const remaining = MAX_COMBINATIONS_PER_ADDON - candidate;
+
+          if (bestRemaining === null || remaining < bestRemaining){
+            bestRemaining = remaining;
+            bestBin = i;
+          }
+        }
+      }
+
+      if (bestBin === -1){
+        bins.push({
+          groups: [group],
+          combinations: radix
+        });
+      } else {
+        bins[bestBin].groups.push(group);
+        bins[bestBin].combinations *= radix;
+      }
+    }
+
+    bins.forEach(bin => {
+      bin.maxBody = bin.combinations - 1n;
+    });
+
+    return bins;
+  }
+
+  function renderAddonPlan(){
+    const addonOut = document.getElementById('addonPlan');
+    if (!addonOut) return;
+
+    addonOut.innerHTML = '';
+
+    if (!BODYGROUPS.length){
+      addonOut.innerHTML =
+        '<div class="empty-hint">Ajoute des bodygroups pour calculer la répartition.</div>';
+      return;
+    }
+
+    try {
+      const bins = optimizeAddonPacking();
+      const total = getCombinationCount(BODYGROUPS);
+
+      const summary = document.createElement('div');
+      summary.className = 'addon-summary';
+      summary.innerHTML =
+        `<div><b>Combinaisons globales :</b> ${formatBigInt(total)}</div>` +
+        `<div><b>Max body global :</b> ${formatBigInt(total - 1n)}</div>` +
+        `<div><b>Addons nécessaires :</b> ${bins.length}</div>` +
+        `<div><b>Capacité par addon :</b> ${formatBigInt(MAX_COMBINATIONS_PER_ADDON)} combinaisons</div>`;
+      addonOut.appendChild(summary);
+
+      bins.forEach((bin, addonIndex) => {
+        const card = document.createElement('div');
+        card.className = 'addon-card';
+
+        const head = document.createElement('div');
+        head.className = 'addon-card-head';
+        head.textContent =
+          `ADDON ${String(addonIndex + 1).padStart(2, '0')}`;
+
+        const meta = document.createElement('div');
+        meta.className = 'addon-card-meta';
+        meta.textContent =
+          `${formatBigInt(bin.combinations)} combinaisons · ` +
+          `m_nBody max = ${formatBigInt(bin.maxBody)}`;
+
+        const list = document.createElement('div');
+        list.className = 'addon-groups';
+
+        bin.groups.forEach(bg => {
+          const row = document.createElement('div');
+          row.className = 'addon-group-row';
+
+          const name = document.createElement('span');
+          name.textContent = bg.name;
+
+          const count = document.createElement('span');
+          count.textContent = `×${bg.options.length}`;
+
+          row.appendChild(name);
+          row.appendChild(count);
+          list.appendChild(row);
+        });
+
+        card.appendChild(head);
+        card.appendChild(meta);
+        card.appendChild(list);
+        addonOut.appendChild(card);
+      });
+
+    } catch (err){
+      addonOut.innerHTML =
+        `<div class="empty-hint" style="color:var(--warn);">⚠ ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function luaString(str){
+    return JSON.stringify(String(str));
   }
 
   function sanitizeFileName(value){
     return String(value || 'addon')
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-zA-Z0-9_-]+/g, '_')
       .replace(/^_+|_+$/g, '')
       .toLowerCase() || 'addon';
   }
 
   function qcQuote(value){
-    return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+    return `"${String(value)
+      .replaceAll('\\', '\\\\')
+      .replaceAll('"', '\\"')}"`;
   }
 
-  function buildAddonPackage(){
-    const bins = optimizeAddonPacking();
+  function makeAddonQC(addonName, modelName, bin){
+    const lines = [
+      `$modelname "cater_multiaddon/${addonName}/${modelName}.mdl"`,
+      `$body "body" "body.smd"`,
+      `$staticprop`,
+      `$surfaceprop "flesh"`,
+      ``
+    ];
 
-    return bins.map((bin, addonIndex) => {
-      const addonName = `bodygroup_addon_${String(addonIndex + 1).padStart(2, '0')}`;
-      const modelName = `${addonName}_model`;
+    bin.groups.forEach(bg => {
+      lines.push(`$bodygroup ${qcQuote(bg.name)}`);
+      lines.push(`{`);
 
-      // Les paths ci-dessous sont volontairement des chemins de template.
-      // Le modèle source doit être remplacé par le .smd réel de l'utilisateur.
-      const qc = [
-        `$modelname "cater/${addonName}/${modelName}.mdl"`,
-        `$body "body" "SOURCE_REPLACE_ME.smd"`,
-        `$staticprop`,
-        `$surfaceprop "flesh"`,
-        ``,
-        `// Bodygroups attribués à cet addon :`,
-        ...bin.groups.map(bg => `// - ${bg.name}: ${bg.options.length} options`),
-        ``,
-        `// IMPORTANT :`,
-        `// 1. Remplace SOURCE_REPLACE_ME.smd par ton SMD/DMX.`,
-        `// 2. Les bodygroups doivent être créés dans le QC dans le même ordre que cette liste.`,
-        `// 3. Compile ce QC avec StudioMDL.`,
-        ``,
-        `$sequence "idle" "idle.smd" fps 30`
-      ].join('\n');
+      bg.options.forEach((option, index) => {
+        // Le nom d'option est utilisé comme nom de SMD.
+        // L'utilisateur peut remplacer ces chemins dans le QC.
+        const smd = sanitizeFileName(option || `option_${index}`) + `.smd`;
+        if (index === 0 && /^(blank|none|empty|vide)$/i.test(option || '')){
+          lines.push(`    studio "blank.smd"`);
+        } else {
+          lines.push(`    studio ${qcQuote(smd)}`);
+        }
+      });
 
-      const lua = [
-        `-- ${addonName}`,
-        `-- Généré par CATER GRAPHISME Bodygroup Calculator`,
-        `-- Ce fichier crée les modèles clientside et les bonemerge sur l'entité.`,
-        ``,
-        `local ADDON_MODELS = {`,
-        `    ${luaString(`models/cater/${addonName}/${modelName}.mdl`)},`,
-        `}`,
-        ``,
-        `local spawnedParts = {}`,
-        ``,
-        `local function RemoveAddonParts(ent)`,
-        `    local parts = spawnedParts[ent]`,
-        `    if not parts then return end`,
-        `    for _, mdl in ipairs(parts) do`,
-        `        if IsValid(mdl) then mdl:Remove() end`,
-        `    end`,
-        `    spawnedParts[ent] = nil`,
-        `end`,
-        ``,
-        `local function BoneMergeModel(ent, modelPath)`,
-        `    if not IsValid(ent) then return nil end`,
-        `    local mdl = ClientsideModel(modelPath, RENDERGROUP_BOTH)`,
-        `    if not IsValid(mdl) then return nil end`,
-        `    mdl:SetPos(ent:GetPos())`,
-        `    mdl:SetAngles(ent:GetAngles())`,
-        `    mdl:SetParent(ent)`,
-        `    mdl:AddEffects(EF_BONEMERGE)`,
-        `    mdl:AddEffects(EF_BONEMERGE_FASTCULL)`,
-        `    mdl:AddEffects(EF_PARENT_ANIMATES)`,
-        `    mdl:SetNoDraw(false)`,
-        `    return mdl`,
-        `end`,
-        ``,
-        `function CATER_Bodygroup_Addon_Build(ent)`,
-        `    if not IsValid(ent) then return end`,
-        `    RemoveAddonParts(ent)`,
-        `    spawnedParts[ent] = {}`,
-        `    for _, path in ipairs(ADDON_MODELS) do`,
-        `        local mdl = BoneMergeModel(ent, path)`,
-        `        if IsValid(mdl) then`,
-        `            table.insert(spawnedParts[ent], mdl)`,
-        `        end`,
-        `    end`,
-        `end`,
-        ``,
-        `function CATER_Bodygroup_Addon_Remove(ent)`,
-        `    RemoveAddonParts(ent)`,
-        `end`,
-        ``,
-        `hook.Add("EntityRemoved", "${addonName}_Cleanup", function(ent)`,
-        `    RemoveAddonParts(ent)`,
-        `end)`,
-        ``,
-        `-- Utilisation :`,
-        `-- CATER_Bodygroup_Addon_Build(ply)`,
-        `-- CATER_Bodygroup_Addon_Remove(ply)`,
-        ``
-      ].join('\n');
+      // Si aucune option n'existe, on garde une structure QC valide.
+      if (!bg.options.length) lines.push(`    studio "blank.smd"`);
 
-      const readme = [
-        `# ${addonName}`,
-        ``,
-        `Addon généré par CATER GRAPHISME Bodygroup Calculator.`,
-        ``,
-        `## Rôle`,
-        ``,
-        `Cet addon contient une partie des bodygroups afin d'éviter de dépasser`,
-        `la limite de m_nBody 32 bits d'un seul modèle.`,
-        ``,
-        `## Structure`,
-        ``,
-        `models/`,
-        `└── cater/`,
-        `    └── ${addonName}/`,
-        `        └── ${modelName}.mdl`,
-        ``,
-        `lua/`,
-        `└── autorun/`,
-        `    └── ${addonName}.lua`,
-        ``,
-        `qc/`,
-        `└── ${modelName}.qc`,
-        ``,
-        `## Bodygroups de cet addon`,
-        ``,
-        ...bin.groups.map((bg, i) => `${i}. ${bg.name} — ${bg.options.length} options`),
-        ``,
-        `## Compilation`,
-        ``,
-        `1. Prépare les SMD/DMX nécessaires.`,
-        `2. Remplace SOURCE_REPLACE_ME.smd dans le QC.`,
-        `3. Vérifie que les bodygroups sont dans l'ordre indiqué ci-dessus.`,
-        `4. Compile le QC avec StudioMDL.`,
-        `5. Place le .mdl compilé dans garrysmod/models/cater/${addonName}/.`,
-        ``,
-        `## Bonemerge`,
-        ``,
-        `Le Lua crée le modèle clientside et applique EF_BONEMERGE.`,
-        `Il faut appeler :`,
-        ``,
-        `CATER_Bodygroup_Addon_Build(ply)`,
-        ``,
-        `sur le joueur/entité à habiller.`,
-        ``,
-        `## Important`,
-        ``,
-        `Le calculateur répartit les bodygroups mathématiquement.`,
-        `Il ne peut pas fabriquer les géométries SMD/DMX qui n'existent pas.`,
-        `Les modèles doivent donc être préparés et compilés séparément.`,
-        ``,
-        `Chaque addon garde son propre m_nBody. Les addons sont ensuite affichés`,
-        `ensemble par bonemerge.`,
-        ``
-      ].join('\n');
-
-      return {
-        addonName,
-        qc,
-        lua,
-        readme,
-        json: JSON.stringify({
-          addon: addonName,
-          model: `models/cater/${addonName}/${modelName}.mdl`,
-          groups: bin.groups.map(bg => ({
-            name: bg.name,
-            optionCount: bg.options.length,
-            options: bg.options
-          })),
-          combinations: bin.combinations.toString(),
-          maxBody: bin.maxBody.toString()
-        }, null, 2)
-      };
+      lines.push(`}`);
+      lines.push(``);
     });
+
+    lines.push(
+      `$sequence "idle" "idle.smd" fps 30`,
+      ``,
+      `// ============================================================`,
+      `// CATER GRAPHISME - MULTI ADDON`,
+      `// Bodygroups contenus dans cet addon :`,
+      ...bin.groups.map(bg => `//   ${bg.name} : ${bg.options.length} options`),
+      `//`,
+      `// IMPORTANT : tous les modèles doivent partager le même squelette`,
+      `// et les mêmes noms de bones que le playermodel principal pour le`,
+      `// bonemerge. Remplace body.smd / idle.smd et les options par tes SMD.`,
+      `// ============================================================`
+    );
+
+    return lines.join('\n');
+  }
+
+  function makeAddonLua(addonName, modelName, bin){
+    const modelPath = `models/cater_multiaddon/${addonName}/${modelName}.mdl`;
+
+    const lines = [
+      `-- ${addonName}.lua`,
+      `-- Généré par CATER GRAPHISME Bodygroup Calculator`,
+      ``,
+      `if SERVER then AddCSLuaFile() end`,
+      ``,
+      `CATER_MULTIADDON = CATER_MULTIADDON or {}`,
+      `CATER_MULTIADDON[${luaString(addonName)}] = CATER_MULTIADDON[${luaString(addonName)}] or {}`,
+      `CATER_MULTIADDON[${luaString(addonName)}].Model = ${luaString(modelPath)}`,
+      ``,
+      `CATER_MULTIADDON[${luaString(addonName)}].Bodygroups = {`
+    ];
+
+    bin.groups.forEach(bg => {
+      lines.push(
+        `    ${luaString(bg.name)} = {`
+      );
+      bg.options.forEach((opt, idx) => {
+        lines.push(`        [${idx}] = ${luaString(opt)},`);
+      });
+      lines.push(`    },`);
+    });
+
+    lines.push(
+      `}`,
+      ``,
+      `-- Cette fonction applique le m_nBody de cet addon au modèle bonemergé.`,
+      `function CATER_MULTIADDON_SetBodyValue(part, bodyValue)`,
+      `    if not IsValid(part) then return end`,
+      `    local value = math.max(0, math.floor(tonumber(bodyValue) or 0))`,
+      `    part:SetBodygroup(0, 0) -- force une mise à jour du modèle`,
+      `    local groups = CATER_MULTIADDON[${luaString(addonName)}].Bodygroups`,
+      `    local multiplier = 1`,
+      `    for name, options in pairs(groups) do`,
+      `        local count = table.Count(options)`,
+      `        if count > 0 then`,
+      `            local index = value % count`,
+      `            local id = part:FindBodygroupByName(name)`,
+      `            if id and id >= 0 then`,
+      `                part:SetBodygroup(id, index)`,
+      `            end`,
+      `            value = math.floor(value / count)`,
+      `        end`,
+      `    end`,
+      `end`,
+      ``,
+      `-- Crée le modèle secondaire et le bonemerge au joueur.`,
+      `function CATER_MULTIADDON_Build_${sanitizeFileName(addonName)}(ent, bodyValue)`,
+      `    if not IsValid(ent) then return nil end`,
+      `    local part = ClientsideModel(${luaString(modelPath)}, RENDERGROUP_BOTH)`,
+      `    if not IsValid(part) then return nil end`,
+      ``,
+      `    part:SetPos(ent:GetPos())`,
+      `    part:SetAngles(ent:GetAngles())`,
+      `    part:SetParent(ent)`,
+      `    part:AddEffects(EF_BONEMERGE)`,
+      `    part:AddEffects(EF_BONEMERGE_FASTCULL)`,
+      `    part:AddEffects(EF_PARENT_ANIMATES)`,
+      `    part:SetSkin(ent:GetSkin())`,
+      `    CATER_MULTIADDON_SetBodyValue(part, bodyValue)`,
+      `    return part`,
+      `end`,
+      ``
+    );
+
+    return lines.join('\n');
+  }
+
+  function makeControllerLua(bins){
+    const lines = [
+      `-- CATER Multi-Addon Controller`,
+      `-- Généré automatiquement.`,
+      ``,
+      `if SERVER then AddCSLuaFile() return end`,
+      ``,
+      `CATER_MULTIADDON_CONTROLLER = CATER_MULTIADDON_CONTROLLER or {}`,
+      `CATER_MULTIADDON_CONTROLLER.Parts = CATER_MULTIADDON_CONTROLLER.Parts or {}`,
+      ``,
+      `local ADDONS = {`
+    ];
+
+    bins.forEach((bin, i) => {
+      const addonName = `bodygroup_addon_${String(i + 1).padStart(2, '0')}`;
+      lines.push(
+        `    { name = ${luaString(addonName)}, model = ${luaString(`models/cater_multiaddon/${addonName}/${addonName}_model.mdl`)} },`
+      );
+    });
+
+    lines.push(
+      `}`,
+      ``,
+      `function CATER_MULTIADDON_CONTROLLER.Clear(ent)`,
+      `    local parts = CATER_MULTIADDON_CONTROLLER.Parts[ent]`,
+      `    if not parts then return end`,
+      `    for _, part in ipairs(parts) do`,
+      `        if IsValid(part) then part:Remove() end`,
+      `    end`,
+      `    CATER_MULTIADDON_CONTROLLER.Parts[ent] = nil`,
+      `end`,
+      ``,
+      `function CATER_MULTIADDON_CONTROLLER.Build(ent, bodyValues)`,
+      `    if not IsValid(ent) then return end`,
+      `    CATER_MULTIADDON_CONTROLLER.Clear(ent)`,
+      `    CATER_MULTIADDON_CONTROLLER.Parts[ent] = {}`,
+      `    for i, info in ipairs(ADDONS) do`,
+      `        local builder = "CATER_MULTIADDON_Build_" .. info.name`,
+      `        local fn = _G[builder]`,
+      `        if isfunction(fn) then`,
+      `            local part = fn(ent, bodyValues and bodyValues[i] or 0)`,
+      `            if IsValid(part) then`,
+      `                table.insert(CATER_MULTIADDON_CONTROLLER.Parts[ent], part)`,
+      `            end`,
+      `        end`,
+      `    end`,
+      `end`,
+      ``,
+      `hook.Add("EntityRemoved", "CATER_MULTIADDON_Controller_Cleanup", function(ent)`,
+      `    CATER_MULTIADDON_CONTROLLER.Clear(ent)`,
+      `end)`,
+      ``,
+      `-- Exemple :`,
+      `-- CATER_MULTIADDON_CONTROLLER.Build(ply, { 12345, 678, 9 })`,
+      `-- Chaque nombre correspond au m_nBody de l'addon correspondant.`,
+      ``
+    );
+
+    return lines.join('\n');
+  }
+
+  function makeRootReadme(bins, total){
+    const lines = [
+      `# CATER Multi-Addon Bodygroup System`,
+      ``,
+      `Généré par CATER GRAPHISME Bodygroup Calculator.`,
+      ``,
+      `## Pourquoi plusieurs addons ?`,
+      ``,
+      `Un seul m_nBody est limité à 32 bits. Ce projet répartit les bodygroups`,
+      `sur plusieurs modèles bonemergés. Chaque modèle possède son propre`,
+      `m_nBody, tandis que le joueur voit un seul personnage final.`,
+      ``,
+      `Combinaisons globales : ${formatBigInt(total)}`,
+      `Nombre d'addons : ${bins.length}`,
+      `Capacité par addon : ${formatBigInt(MAX_COMBINATIONS_PER_ADDON)} combinaisons`,
+      ``,
+      `## Organisation`,
+      ``,
+      `cater_multiaddon/`,
+      `├── lua/`,
+      `│   └── autorun/`,
+      `│       ├── cater_multiaddon_controller.lua`,
+      ...bins.map((_, i) => `│       └── bodygroup_addon_${String(i + 1).padStart(2, '0')}.lua`),
+      `├── models/`,
+      `│   └── cater_multiaddon/`,
+      ...bins.map((_, i) => `│       └── bodygroup_addon_${String(i + 1).padStart(2, '0')}/`),
+      `├── qc/`,
+      ...bins.map((_, i) => `│   └── bodygroup_addon_${String(i + 1).padStart(2, '0')}.qc`),
+      `└── config/`,
+      `    └── bodygroups.json`,
+      ``,
+      `## Compilation des modèles`,
+      ``,
+      `Pour chaque QC :`,
+      `1. Place les SMD/DMX dans le dossier de travail StudioMDL.`,
+      `2. Vérifie le $modelname.`,
+      `3. Vérifie chaque $bodygroup et chaque studio.`,
+      `4. Vérifie que les bones correspondent au playermodel principal.`,
+      `5. Compile avec StudioMDL.`,
+      `6. Copie les .mdl/.vvd/.phy/.dx90.vtx/etc. dans le dossier models indiqué.`,
+      ``,
+      `## Bonemerge`,
+      ``,
+      `Le contrôleur crée les modèles secondaires en ClientsideModel, les parent`,
+      `au joueur et applique EF_BONEMERGE. Les bodygroups sont ensuite configurés`,
+      `sur chaque modèle secondaire avec son propre m_nBody.`,
+      ``,
+      `## Important`,
+      ``,
+      `Les fichiers générés ne peuvent pas inventer les géométries 3D : body.smd,`,
+      `idle.smd et les SMD des options doivent être préparés avec ton modèle.`,
+      `Les noms des options sont utilisés comme noms de fichiers SMD dans les QC.`,
+      ``,
+      `## Sélection`,
+      ``,
+      `Le calculateur affiche le m_nBody global et la répartition. Pour le système`,
+      `en jeu, utilise un bodyValue par addon. Le contrôleur accepte par exemple :`,
+      ``,
+      `CATER_MULTIADDON_CONTROLLER.Build(ply, { 123, 456, 789 })`,
+      ``
+    ]
+    return lines.join('\n');
+  }
+
+  function makeConfigJSON(bins){
+    return JSON.stringify({
+      version: 1,
+      bodyLimit: BODY_LIMIT.toString(),
+      maxCombinationsPerAddon: MAX_COMBINATIONS_PER_ADDON.toString(),
+      addons: bins.map((bin, i) => ({
+        name: `bodygroup_addon_${String(i + 1).padStart(2, '0')}`,
+        combinations: bin.combinations.toString(),
+        maxBody: bin.maxBody.toString(),
+        bodygroups: bin.groups.map(bg => ({
+          name: bg.name,
+          options: bg.options
+        }))
+      }))
+    }, null, 2);
+  }
+
+  /*
+   * Petit générateur ZIP "store" intégré : aucun CDN, aucune librairie externe.
+   * Ainsi le fichier HTML fonctionne même hors connexion.
+   */
+  function crc32(bytes){
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++){
+      crc ^= bytes[i];
+      for (let j = 0; j < 8; j++){
+        crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+      }
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function u16(n){
+    return new Uint8Array([n & 255, (n >>> 8) & 255]);
+  }
+
+  function u32(n){
+    return new Uint8Array([
+      n & 255, (n >>> 8) & 255,
+      (n >>> 16) & 255, (n >>> 24) & 255
+    ]);
+  }
+
+  function concatBytes(...arrays){
+    const total = arrays.reduce((n, a) => n + a.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    arrays.forEach(a => {
+      out.set(a, offset);
+      offset += a.length;
+    });
+    return out;
+  }
+
+  function makeZip(files){
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+
+    files.forEach(file => {
+      const name = encoder.encode(file.name);
+      const data = encoder.encode(file.content);
+      const crc = crc32(data);
+
+      const local = concatBytes(
+        u32(0x04034b50), u16(20), u16(0x0800),
+        u16(0), u16(0), u16(0),
+        u32(crc), u32(data.length), u32(data.length),
+        u16(name.length), u16(0),
+        name, data
+      );
+
+      const central = concatBytes(
+        u32(0x02014b50), u16(20), u16(20), u16(0x0800),
+        u16(0), u16(0), u16(0),
+        u32(crc), u32(data.length), u32(data.length),
+        u16(name.length), u16(0), u16(0),
+        u16(0), u16(0), u32(0), u32(offset),
+        name
+      );
+
+      localParts.push(local);
+      centralParts.push(central);
+      offset += local.length;
+    });
+
+    const localBytes = concatBytes(...localParts);
+    const centralBytes = concatBytes(...centralParts);
+
+    const end = concatBytes(
+      u32(0x06054b50),
+      u16(0), u16(0),
+      u16(files.length), u16(files.length),
+      u32(centralBytes.length), u32(localBytes.length),
+      u16(0)
+    );
+
+    return concatBytes(localBytes, centralBytes, end);
   }
 
   function downloadTextFile(filename, content, mime='text/plain'){
@@ -856,48 +1177,110 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function generateAddonFiles(){
-    try {
-      const packages = buildAddonPackage();
+  function buildGeneratedFiles(){
+    const bins = optimizeAddonPacking();
+    const total = getCombinationCount(BODYGROUPS);
+    const files = [];
 
-      packages.forEach(pkg => {
-        downloadTextFile(`${pkg.addonName}.qc`, pkg.qc);
-        downloadTextFile(`${pkg.addonName}.lua`, pkg.lua);
-        downloadTextFile(`${pkg.addonName}_README.md`, pkg.readme);
-        downloadTextFile(`${pkg.addonName}.json`, pkg.json, 'application/json');
+    bins.forEach((bin, i) => {
+      const num = String(i + 1).padStart(2, '0');
+      const addonName = `bodygroup_addon_${num}`;
+      const modelName = `${addonName}_model`;
+
+      files.push({
+        name: `qc/${addonName}.qc`,
+        content: makeAddonQC(addonName, modelName, bin)
       });
 
-      const status = document.getElementById('generatedFilesStatus');
+      files.push({
+        name: `lua/autorun/${addonName}.lua`,
+        content: makeAddonLua(addonName, modelName, bin)
+      });
+    });
+
+    files.push({
+      name: `lua/autorun/cater_multiaddon_controller.lua`,
+      content: makeControllerLua(bins)
+    });
+
+    files.push({
+      name: `config/bodygroups.json`,
+      content: makeConfigJSON(bins)
+    });
+
+    files.push({
+      name: `README.md`,
+      content: makeRootReadme(bins, total)
+    });
+
+    return {files, bins, total};
+  }
+
+  function generateAddonFiles(){
+    const status = document.getElementById('generatedFilesStatus');
+
+    try {
+      const result = buildGeneratedFiles();
+      const zipBytes = makeZip(result.files);
+
+      const blob = new Blob([zipBytes], {type:'application/zip'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cater_multiaddon_generated.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+
       status.textContent =
-        `✓ ${packages.length} addon(s) généré(s) : QC + Lua + README + JSON. ` +
-        `Les .mdl doivent être compilés avec StudioMDL.`;
+        `✓ PACK ZIP généré : ${result.bins.length} addon(s), ` +
+        `${result.files.length} fichiers.`;
     } catch (err){
-      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+      status.textContent = `⚠ ${err.message}`;
     }
   }
 
   function generateAddonLuaOnly(){
+    const status = document.getElementById('generatedFilesStatus');
+
     try {
-      const packages = buildAddonPackage();
-      packages.forEach(pkg => downloadTextFile(`${pkg.addonName}.lua`, pkg.lua));
-      document.getElementById('generatedFilesStatus').textContent =
-        `✓ ${packages.length} fichier(s) Lua généré(s).`;
+      const result = buildGeneratedFiles();
+      const controller = result.files.find(f => f.name.endsWith('cater_multiaddon_controller.lua'));
+
+      downloadTextFile('cater_multiaddon_controller.lua', controller.content);
+
+      result.bins.forEach((_, i) => {
+        const num = String(i + 1).padStart(2, '0');
+        const file = result.files.find(
+          f => f.name === `lua/autorun/bodygroup_addon_${num}.lua`
+        );
+        if (file) downloadTextFile(`bodygroup_addon_${num}.lua`, file.content);
+      });
+
+      status.textContent =
+        `✓ ${result.bins.length + 1} fichier(s) Lua généré(s).`;
     } catch (err){
-      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+      status.textContent = `⚠ ${err.message}`;
     }
   }
 
   function generateAddonReadmeOnly(){
+    const status = document.getElementById('generatedFilesStatus');
+
     try {
-      const packages = buildAddonPackage();
-      packages.forEach(pkg => downloadTextFile(`${pkg.addonName}_README.md`, pkg.readme));
-      document.getElementById('generatedFilesStatus').textContent =
-        `✓ ${packages.length} README généré(s).`;
+      const result = buildGeneratedFiles();
+      downloadTextFile('README.md', result.files.find(f => f.name === 'README.md').content);
+      downloadTextFile('bodygroups.json', result.files.find(f => f.name === 'config/bodygroups.json').content, 'application/json');
+
+      status.textContent = '✓ README.md + bodygroups.json générés.';
     } catch (err){
-      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+      status.textContent = `⚠ ${err.message}`;
     }
   }
 
+  document.getElementById('optimizeAddonBtn').onclick = renderAddonPlan;
   document.getElementById('generateAddonFilesBtn').onclick = generateAddonFiles;
   document.getElementById('generateAddonLuaBtn').onclick = generateAddonLuaOnly;
   document.getElementById('generateAddonReadmeBtn').onclick = generateAddonReadmeOnly;
@@ -914,6 +1297,7 @@
 
   renderEditor();
   renderCalculator();
+  renderAddonPlan();
 </script>
 
 </body>
