@@ -205,6 +205,32 @@
   }
   .code-out b{ color: var(--accent); }
 
+
+  .addon-summary{
+    display:grid; gap:6px; margin-top:14px; margin-bottom:12px;
+    padding:14px 16px; background:var(--mono-bg); border:1px solid var(--line);
+    font-family:'Consolas','Courier New',monospace; font-size:12px; line-height:1.6;
+  }
+  .addon-card{
+    border:1px solid var(--line); background:var(--bg-panel-2);
+    margin-top:10px; padding:14px 16px;
+  }
+  .addon-card-head{
+    color:var(--accent); font-family:'Consolas','Courier New',monospace;
+    font-size:12px; font-weight:800; letter-spacing:.08em;
+  }
+  .addon-card-meta{
+    margin-top:4px; color:var(--text-dim);
+    font-family:'Consolas','Courier New',monospace; font-size:11px;
+  }
+  .addon-groups{ margin-top:12px; display:grid; gap:4px; }
+  .addon-group-row{
+    display:flex; justify-content:space-between; gap:12px;
+    padding:6px 8px; border-top:1px solid var(--line);
+    font-family:'Consolas','Courier New',monospace; font-size:11.5px;
+  }
+  .addon-group-row span:last-child{ color:var(--accent); }
+
   .empty-hint{ color: var(--text-dim); font-size: 12.5px; padding: 10px 0; }
 
   footer{
@@ -219,18 +245,18 @@
 <div class="topline"></div>
 
 <header>
-  <div class="eyebrow">// Outil interne — bodygroups — v1.0</div>
+  <div class="eyebrow">// Outil interne — bodygroups — v2.0 MULTI-ADDON</div>
   <h1>BODYGROUP <span>CALCULATOR</span></h1>
   <div class="subtitle">Configuration & calcul de body value — Source Engine / GMod</div>
 
   <div class="badges">
     <span class="badge">Base mixte</span>
-    <span class="badge">Limite 2³² = 4 294 967 295</span>
+    <span class="badge">m_nBody : 32 bits</span>
     <span class="badge">Sauvegarde locale automatique</span>
     <span class="badge">Export / Import JSON</span>
   </div>
 
-  <div class="callout">Configure librement tes bodygroups à gauche : aucun nombre maximal n'est imposé par l'outil, seule la limite réelle du moteur s'applique.</div>
+  <div class="callout">Configure librement tes bodygroups à gauche. Si la combinaison globale dépasse m_nBody 32 bits, le mode multi-addon répartit automatiquement les groupes sur plusieurs modèles.</div>
 </header>
 
 <div class="layout">
@@ -278,6 +304,18 @@
 
         <div class="limit-box" id="limitBox"></div>
         <div class="code-out" id="codeOut"></div>
+
+        <div class="subblock-head" style="margin-top:22px;">
+          <span class="tag">Multi-addon</span>
+          <h3>Répartition automatique pour dépasser m_nBody</h3>
+        </div>
+
+        <div class="callout" style="margin-bottom:14px;">
+          Si la combinaison globale dépasse 2³²−1, l'outil répartit les bodygroups sur plusieurs modèles.
+          Chaque modèle garde son propre m_nBody et reste sous la limite 32 bits.
+        </div>
+
+        <div id="addonPlan"></div>
       </div>
     </div>
 
@@ -287,7 +325,7 @@
         <h2>Décoder un body value</h2>
       </div>
       <div class="block">
-        <input type="number" min="0" class="decode-input" id="decodeInput" placeholder="Entrer un body value, ex: 317775">
+        <input type="text" inputmode="numeric" pattern="[0-9]*" class="decode-input" id="decodeInput" placeholder="Entrer un body value, ex: 317775">
         <div class="decode-list" id="decodeList"></div>
       </div>
     </div>
@@ -296,7 +334,7 @@
 </div>
 
 <footer>
-  Formule : <b>body = Σ (index × produit des tailles précédentes)</b>. L'ordre des bodygroups dans l'éditeur doit correspondre à l'ordre du fichier QC — utilise ▲▼ pour corriger si besoin.
+  Formule : <b>body = Σ (index × produit des tailles précédentes)</b>. En mode multi-addon, chaque addon possède son propre calcul mixed-radix et donc son propre m_nBody.
 </footer>
 
 <script>
@@ -491,11 +529,19 @@
     reader.onload = (evt) => {
       try{
         const parsed = JSON.parse(evt.target.result);
-        if (Array.isArray(parsed)){
+        const valid = Array.isArray(parsed) &&
+          parsed.every(bg =>
+            bg &&
+            typeof bg.name === 'string' &&
+            Array.isArray(bg.options) &&
+            bg.options.every(opt => typeof opt === 'string')
+          );
+
+        if (valid){
           BODYGROUPS = parsed;
           saveAndRefresh();
         } else {
-          alert('Fichier invalide : le JSON doit être une liste de bodygroups.');
+          alert('Fichier invalide : chaque bodygroup doit contenir un nom et une liste d’options.');
         }
       }catch(err){
         alert('Erreur de lecture du fichier JSON.');
@@ -586,9 +632,7 @@
     let luaLines = chosen
       .filter(c => c.idx !== 0)
       .map(c => `ent:SetBodygroup(ent:FindBodygroupByName("${c.name}"), ${c.idx})`);
-    codeOutEl.innerHTML = luaLines.length
-      ? `<b>-- Code Lua équivalent :</b>\n` + luaLines.join('\n')
-      : `<b>-- Code Lua équivalent :</b>\n-- (tout est à l'index 0 / blank)`;
+    codeOutEl.textContent = `-- Code Lua équivalent :\n` + (luaLines.length ? luaLines.join('\n') : '-- (tout est à l’index 0 / blank)');
   }
 
   function decode(bodyStr){
