@@ -316,6 +316,24 @@
         </div>
 
         <div id="addonPlan"></div>
+
+        <div class="subblock-head" style="margin-top:22px;">
+          <span class="tag">Export</span>
+          <h3>Générer les fichiers du système bonemerge</h3>
+        </div>
+
+        <div class="callout" style="margin-bottom:14px;">
+          Génère la structure de chaque addon : QC, Lua de bonemerge, README et configuration JSON.
+          Les modèles .mdl doivent ensuite être compilés avec StudioMDL à partir des QC.
+        </div>
+
+        <div class="toolbar">
+          <button class="primary" id="generateAddonFilesBtn">Générer les fichiers</button>
+          <button id="generateAddonLuaBtn">Lua seul</button>
+          <button id="generateAddonReadmeBtn">README seul</button>
+        </div>
+
+        <div id="generatedFilesStatus" class="empty-hint"></div>
       </div>
     </div>
 
@@ -651,6 +669,239 @@
       decodeList.appendChild(item);
     });
   }
+
+  function sanitizeFileName(value){
+    return String(value || 'addon')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase() || 'addon';
+  }
+
+  function qcQuote(value){
+    return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  }
+
+  function buildAddonPackage(){
+    const bins = optimizeAddonPacking();
+
+    return bins.map((bin, addonIndex) => {
+      const addonName = `bodygroup_addon_${String(addonIndex + 1).padStart(2, '0')}`;
+      const modelName = `${addonName}_model`;
+
+      // Les paths ci-dessous sont volontairement des chemins de template.
+      // Le modèle source doit être remplacé par le .smd réel de l'utilisateur.
+      const qc = [
+        `$modelname "cater/${addonName}/${modelName}.mdl"`,
+        `$body "body" "SOURCE_REPLACE_ME.smd"`,
+        `$staticprop`,
+        `$surfaceprop "flesh"`,
+        ``,
+        `// Bodygroups attribués à cet addon :`,
+        ...bin.groups.map(bg => `// - ${bg.name}: ${bg.options.length} options`),
+        ``,
+        `// IMPORTANT :`,
+        `// 1. Remplace SOURCE_REPLACE_ME.smd par ton SMD/DMX.`,
+        `// 2. Les bodygroups doivent être créés dans le QC dans le même ordre que cette liste.`,
+        `// 3. Compile ce QC avec StudioMDL.`,
+        ``,
+        `$sequence "idle" "idle.smd" fps 30`
+      ].join('\n');
+
+      const lua = [
+        `-- ${addonName}`,
+        `-- Généré par CATER GRAPHISME Bodygroup Calculator`,
+        `-- Ce fichier crée les modèles clientside et les bonemerge sur l'entité.`,
+        ``,
+        `local ADDON_MODELS = {`,
+        `    ${luaString(`models/cater/${addonName}/${modelName}.mdl`)},`,
+        `}`,
+        ``,
+        `local spawnedParts = {}`,
+        ``,
+        `local function RemoveAddonParts(ent)`,
+        `    local parts = spawnedParts[ent]`,
+        `    if not parts then return end`,
+        `    for _, mdl in ipairs(parts) do`,
+        `        if IsValid(mdl) then mdl:Remove() end`,
+        `    end`,
+        `    spawnedParts[ent] = nil`,
+        `end`,
+        ``,
+        `local function BoneMergeModel(ent, modelPath)`,
+        `    if not IsValid(ent) then return nil end`,
+        `    local mdl = ClientsideModel(modelPath, RENDERGROUP_BOTH)`,
+        `    if not IsValid(mdl) then return nil end`,
+        `    mdl:SetPos(ent:GetPos())`,
+        `    mdl:SetAngles(ent:GetAngles())`,
+        `    mdl:SetParent(ent)`,
+        `    mdl:AddEffects(EF_BONEMERGE)`,
+        `    mdl:AddEffects(EF_BONEMERGE_FASTCULL)`,
+        `    mdl:AddEffects(EF_PARENT_ANIMATES)`,
+        `    mdl:SetNoDraw(false)`,
+        `    return mdl`,
+        `end`,
+        ``,
+        `function CATER_Bodygroup_Addon_Build(ent)`,
+        `    if not IsValid(ent) then return end`,
+        `    RemoveAddonParts(ent)`,
+        `    spawnedParts[ent] = {}`,
+        `    for _, path in ipairs(ADDON_MODELS) do`,
+        `        local mdl = BoneMergeModel(ent, path)`,
+        `        if IsValid(mdl) then`,
+        `            table.insert(spawnedParts[ent], mdl)`,
+        `        end`,
+        `    end`,
+        `end`,
+        ``,
+        `function CATER_Bodygroup_Addon_Remove(ent)`,
+        `    RemoveAddonParts(ent)`,
+        `end`,
+        ``,
+        `hook.Add("EntityRemoved", "${addonName}_Cleanup", function(ent)`,
+        `    RemoveAddonParts(ent)`,
+        `end)`,
+        ``,
+        `-- Utilisation :`,
+        `-- CATER_Bodygroup_Addon_Build(ply)`,
+        `-- CATER_Bodygroup_Addon_Remove(ply)`,
+        ``
+      ].join('\n');
+
+      const readme = [
+        `# ${addonName}`,
+        ``,
+        `Addon généré par CATER GRAPHISME Bodygroup Calculator.`,
+        ``,
+        `## Rôle`,
+        ``,
+        `Cet addon contient une partie des bodygroups afin d'éviter de dépasser`,
+        `la limite de m_nBody 32 bits d'un seul modèle.`,
+        ``,
+        `## Structure`,
+        ``,
+        `models/`,
+        `└── cater/`,
+        `    └── ${addonName}/`,
+        `        └── ${modelName}.mdl`,
+        ``,
+        `lua/`,
+        `└── autorun/`,
+        `    └── ${addonName}.lua`,
+        ``,
+        `qc/`,
+        `└── ${modelName}.qc`,
+        ``,
+        `## Bodygroups de cet addon`,
+        ``,
+        ...bin.groups.map((bg, i) => `${i}. ${bg.name} — ${bg.options.length} options`),
+        ``,
+        `## Compilation`,
+        ``,
+        `1. Prépare les SMD/DMX nécessaires.`,
+        `2. Remplace SOURCE_REPLACE_ME.smd dans le QC.`,
+        `3. Vérifie que les bodygroups sont dans l'ordre indiqué ci-dessus.`,
+        `4. Compile le QC avec StudioMDL.`,
+        `5. Place le .mdl compilé dans garrysmod/models/cater/${addonName}/.`,
+        ``,
+        `## Bonemerge`,
+        ``,
+        `Le Lua crée le modèle clientside et applique EF_BONEMERGE.`,
+        `Il faut appeler :`,
+        ``,
+        `CATER_Bodygroup_Addon_Build(ply)`,
+        ``,
+        `sur le joueur/entité à habiller.`,
+        ``,
+        `## Important`,
+        ``,
+        `Le calculateur répartit les bodygroups mathématiquement.`,
+        `Il ne peut pas fabriquer les géométries SMD/DMX qui n'existent pas.`,
+        `Les modèles doivent donc être préparés et compilés séparément.`,
+        ``,
+        `Chaque addon garde son propre m_nBody. Les addons sont ensuite affichés`,
+        `ensemble par bonemerge.`,
+        ``
+      ].join('\n');
+
+      return {
+        addonName,
+        qc,
+        lua,
+        readme,
+        json: JSON.stringify({
+          addon: addonName,
+          model: `models/cater/${addonName}/${modelName}.mdl`,
+          groups: bin.groups.map(bg => ({
+            name: bg.name,
+            optionCount: bg.options.length,
+            options: bg.options
+          })),
+          combinations: bin.combinations.toString(),
+          maxBody: bin.maxBody.toString()
+        }, null, 2)
+      };
+    });
+  }
+
+  function downloadTextFile(filename, content, mime='text/plain'){
+    const blob = new Blob([content], {type: mime});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function generateAddonFiles(){
+    try {
+      const packages = buildAddonPackage();
+
+      packages.forEach(pkg => {
+        downloadTextFile(`${pkg.addonName}.qc`, pkg.qc);
+        downloadTextFile(`${pkg.addonName}.lua`, pkg.lua);
+        downloadTextFile(`${pkg.addonName}_README.md`, pkg.readme);
+        downloadTextFile(`${pkg.addonName}.json`, pkg.json, 'application/json');
+      });
+
+      const status = document.getElementById('generatedFilesStatus');
+      status.textContent =
+        `✓ ${packages.length} addon(s) généré(s) : QC + Lua + README + JSON. ` +
+        `Les .mdl doivent être compilés avec StudioMDL.`;
+    } catch (err){
+      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+    }
+  }
+
+  function generateAddonLuaOnly(){
+    try {
+      const packages = buildAddonPackage();
+      packages.forEach(pkg => downloadTextFile(`${pkg.addonName}.lua`, pkg.lua));
+      document.getElementById('generatedFilesStatus').textContent =
+        `✓ ${packages.length} fichier(s) Lua généré(s).`;
+    } catch (err){
+      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+    }
+  }
+
+  function generateAddonReadmeOnly(){
+    try {
+      const packages = buildAddonPackage();
+      packages.forEach(pkg => downloadTextFile(`${pkg.addonName}_README.md`, pkg.readme));
+      document.getElementById('generatedFilesStatus').textContent =
+        `✓ ${packages.length} README généré(s).`;
+    } catch (err){
+      document.getElementById('generatedFilesStatus').textContent = `⚠ ${err.message}`;
+    }
+  }
+
+  document.getElementById('generateAddonFilesBtn').onclick = generateAddonFiles;
+  document.getElementById('generateAddonLuaBtn').onclick = generateAddonLuaOnly;
+  document.getElementById('generateAddonReadmeBtn').onclick = generateAddonReadmeOnly;
+
   decodeInput.addEventListener('input', (e) => decode(e.target.value));
 
   function saveAndRefresh(resetSelections = true){
