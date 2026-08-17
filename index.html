@@ -373,7 +373,7 @@
       nameInput.className = 'bg-name-input';
       nameInput.value = bg.name;
       nameInput.placeholder = 'Nom du bodygroup';
-      nameInput.oninput = (e) => { bg.name = e.target.value; saveAndRefresh(false); };
+      nameInput.oninput = (e) => { bg.name = e.target.value; saveConfig(); renderCalculator(); if (decodeInput.value !== '') decode(decodeInput.value); };
 
       const delBtn = document.createElement('button');
       delBtn.textContent = 'Supprimer';
@@ -400,7 +400,7 @@
         optInput.className = 'option-input';
         optInput.value = opt;
         optInput.placeholder = 'nom_du_sous_modele.smd';
-        optInput.oninput = (e) => { bg.options[optIndex] = e.target.value; saveAndRefresh(false); };
+        optInput.oninput = (e) => { bg.options[optIndex] = e.target.value; saveConfig(); renderCalculator(); if (decodeInput.value !== '') decode(decodeInput.value); };
 
         const removeBtn = document.createElement('button');
         removeBtn.className = 'remove-opt';
