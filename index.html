@@ -619,6 +619,94 @@
     calculate();
   }
 
+  function calculate(){
+    let body = 0n;
+    let multiplier = 1n;
+    const parts = [];
+
+    BODYGROUPS.forEach((bg, i) => {
+      const count = Array.isArray(bg.options) ? bg.options.length : 0;
+      if (count <= 0) return;
+
+      const index = Math.max(0, Math.min(
+        Number.isInteger(selectedIndices[i]) ? selectedIndices[i] : 0,
+        count - 1
+      ));
+
+      body += BigInt(index) * multiplier;
+      parts.push({ name: bg.name || `(sans nom)`, index, count });
+      multiplier *= BigInt(count);
+    });
+
+    resultEl.textContent = body.toLocaleString('fr-FR');
+    checkLimit();
+
+    if (parts.length === 0){
+      codeOutEl.textContent = 'Aucun bodygroup configuré.';
+      return body;
+    }
+
+    const lines = [
+      '-- Body Value calculé',
+      `body = ${body.toString()}`,
+      '',
+      '-- Décomposition',
+      ...parts.map(p => `${p.name}: index ${p.index} / ${p.count - 1}`)
+    ];
+    codeOutEl.textContent = lines.join('\n');
+    return body;
+  }
+
+  function decode(value){
+    const raw = String(value ?? '').trim();
+    decodeList.innerHTML = '';
+
+    if (!/^\d+$/.test(raw)){
+      if (raw !== ''){
+        decodeList.innerHTML = '<div class="empty-hint">Entre un nombre entier positif.</div>';
+      }
+      return;
+    }
+
+    let remaining;
+    try {
+      remaining = BigInt(raw);
+    } catch (e){
+      decodeList.innerHTML = '<div class="empty-hint">Body value invalide.</div>';
+      return;
+    }
+
+    BODYGROUPS.forEach((bg, i) => {
+      const count = Array.isArray(bg.options) ? bg.options.length : 0;
+      if (count <= 0) return;
+
+      const radix = BigInt(count);
+      const index = Number(remaining % radix);
+      remaining /= radix;
+
+      const item = document.createElement('div');
+      item.className = 'decode-item';
+
+      const left = document.createElement('span');
+      left.textContent = bg.name || `(sans nom)`;
+
+      const right = document.createElement('span');
+      right.textContent = `[${index}] ${bg.options[index] || '(vide)'}`;
+
+      item.appendChild(left);
+      item.appendChild(right);
+      decodeList.appendChild(item);
+    });
+
+    if (remaining > 0n){
+      const warning = document.createElement('div');
+      warning.className = 'empty-hint';
+      warning.style.color = 'var(--warn)';
+      warning.textContent = `⚠ La valeur dépasse la capacité de cette configuration : ${remaining.toString()} reste après décodage.`;
+      decodeList.appendChild(warning);
+    }
+  }
+
   function checkLimit(){
     let total = 1n;
     BODYGROUPS.forEach(bg => { if (bg.options.length > 0) total *= BigInt(bg.options.length); });
